@@ -379,49 +379,50 @@ class RTPClient:
             except OSError:
                 pass
 
-    def trans(self) -> None:
-        while self.NSD:
-            last_sent = time.monotonic_ns()
-            payload = self.pmout.read()
-            payload = self.encode_packet(payload)
-            packet = b"\x80"  # RFC 1889 V2 No Padding Extension or CC.
-            packet += chr(int(self.preference)).encode("utf8")
-            try:
-                packet += self.outSequence.to_bytes(2, byteorder="big")
-            except OverflowError:
-                self.outSequence = 0
-            try:
-                packet += self.outTimestamp.to_bytes(4, byteorder="big")
-            except OverflowError:
-                self.outTimestamp = 0
-            packet += self.outSSRC.to_bytes(4, byteorder="big")
-            packet += payload
+    def trans(self) -> None:  
+        delay = (1 / self.preference.rate) * 160   # 20 ms  
+        next_send = time.perf_counter()  
+  
+        while self.NSD:  
+            payload = self.pmout.read()  
+            payload = self.encode_packet(payload)  
+            packet = b"\x80"  # RFC 1889 Version 2 No Padding Extension or CC.  
+            packet += chr(int(self.preference)).encode("utf8")  
+            try:  
+                packet += self.outSequence.to_bytes(2, byteorder="big")  
+            except OverflowError:  # after 65536 packets = 13010 sec = 21 min  
+                self.outSequence = 0  
+                packet += self.outSequence.to_bytes(2, byteorder="big")  
+            try:  
+                packet += self.outTimestamp.to_bytes(4, byteorder="big")  
+            except OverflowError:  # after 26.843.545 packets = 536870 sec  
+                self.outTimestamp = 0  
+                packet += self.outTimestamp.to_bytes(4, byteorder="big")  
+            packet += self.outSSRC.to_bytes(4, byteorder="big")  
+            packet += payload 
 
-            # debug(payload)
-
-            try:
-                self.sout.sendto(packet, (self.outIP, self.outPort))
-            except OSError:
-                warnings.warn(
-                    "RTP Packet failed to send!",
-                    RuntimeWarning,
-                    stacklevel=2,
-                )
-
-            self.outSequence += 1
-            self.outTimestamp += len(payload)
-            # Calculate how long it took to generate this packet.
-            # Then how long we should wait to send the next, then devide by 2.
-            delay = (1 / self.preference.rate) * 160
-            sleep_time = max(
-                0, delay - ((time.monotonic_ns() - last_sent) / 1000000000)
-            )
-            time.sleep(sleep_time / self.trans_delay_reduction)
-
-    @property
-    def trans_delay_reduction(self) -> float:
-        reduction = pyVoIP.TRANSMIT_DELAY_REDUCTION + 1
-        return reduction if reduction else 1.0
+            to_wait = next_send - time.perf_counter()  
+            if to_wait > 0.01: 
+                time.sleep(0.005) 
+  
+            while True:  
+                delta = time.perf_counter() - next_send  
+                if delta >= 0:  
+                    break
+  
+            next_send = time.perf_counter() + delay - delta 
+            if self.NSD:  
+                try:  
+                    self.sout.sendto(packet, (self.outIP, self.outPort))  
+                except OSError:  
+                    warnings.warn(  
+                        "RTP Packet failed to send!",  
+                        RuntimeWarning,  
+                        stacklevel=2,  
+                    )  
+  
+            self.outSequence += 1  
+            self.outTimestamp += len(payload)  
 
     def parsePacket(self, packet: bytes) -> None:
         warnings.warn(
@@ -458,7 +459,7 @@ class RTPClient:
         if self.preference == PayloadType.PCMU:
             return self.encode_pcmu(payload)
         elif self.preference == PayloadType.PCMA:
-            return self.encode_pcmu(payload)
+            return self.encode_pcma(payload)
         else:
             raise RTPParseError(
                 "Unsupported codec (encode): " + str(self.preference)
